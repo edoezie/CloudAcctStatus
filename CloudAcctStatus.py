@@ -1,54 +1,83 @@
 from __future__ import print_function
 import json
 import requests
-import time
+import configparser
+from requests import api
 
-PRISMA_CLOUD_API_ACCESS_KEY_ID = ""
-PRISMA_CLOUD_API_SECRET_KEY = ""
-PRISMA_CLOUD_API_URL = "https://api2.eu.prismacloud.io"
+# Parser config file for mandatory variables - global var
+config = configparser.ConfigParser() 
 
-headers = {'Content-Type': 'application/json'}
-api_url = PRISMA_CLOUD_API_URL+"/login"
-action = "POST"
-data = {}
-data['username'] = PRISMA_CLOUD_API_ACCESS_KEY_ID
-data['password'] = PRISMA_CLOUD_API_SECRET_KEY
+# Function to parse the config.ini file and see if all is OK.
+def validateConfigParser():
+    try:
+        config.read('config.ini')
+    except configparser.Error as e:
+        raise SystemExit('!!! Error parsing config.ini file!\n %s' % e)
+    return
 
-data_json = json.dumps(data)
-response_raw = requests.request(action, api_url, headers=headers, data=data_json)
-response_data = response_raw.json()
+# Function to execute a call to Prisma Cloud. Returns json body of Prisma Cloud's response.
+def doPrismaAPICall (APIType, APIEndpoint, APIHeaders, APIData = "", APIParams = ""):
+    PRISMA_CLOUD_API_URL = config.get('URL','URL')
+    full_URL = PRISMA_CLOUD_API_URL + APIEndpoint
+    try:
+        response_raw = requests.request(APIType, full_URL, headers=APIHeaders, data=APIData, params=APIParams)
+    except requests.exceptions.RequestException as e:
+        raise SystemExit('!!! Error doing API call to Prisma Cloud!\n %s' % e)
+    if (response_raw.status_code != 200):
+        print("!!! API Call returned not-OK! Exiting script.")
+        print(f"Request-ID: %s", response_raw.headers['x-redlock-request-id'])
+        exit(-1)
+    return response_raw.json()
 
-# Pull the token from the response package
-token = response_data['token']
+# Function to authenticate to Prisma Cloud. Returns token as obtained.
+def authenticatePrismaCloud ():
+    print("\n--- Authenticating to Prisma Cloud via provided token.")
+    api_headers = {'Content-Type': 'application/json'}
+    api_endpoint = "/login"
+    api_data = {}
+    api_data['username'] = config.get('AUTHENTICATION','ACCESS_KEY_ID')
+    api_data['password'] = config.get('AUTHENTICATION','SECRET_KEY')
+    data_json = json.dumps(api_data)
+    response = doPrismaAPICall("POST", api_endpoint, api_headers, data_json, "")
+    return response['token']
 
-#print(token)
+def fetchPrismaCloudAccounts(token,ExclAG = True):
+    action = "GET"
+    endpoint =  "/cloud"
+    headers = {'x-redlock-auth':token}
+    querystring = {"excludeAccountGroupDetails":ExclAG}
+    response = doPrismaAPICall(action, endpoint, headers, "", querystring)
+    return response
 
-# Fetch all basic cloud account info including overall status
-url = PRISMA_CLOUD_API_URL+"/cloud"
-headers = {"x-redlock-auth":token}
-querystring = {"excludeAccountGroupDetails":"true"}
-response_raw = requests.request("GET", url, headers=headers, params=querystring)
-response_data = response_raw.json()
-status = response_raw.status_code
+def fetchPrismaAccountInfo(AccountId, token):
+    action = "GET"
+    endpoint =  "/account/" + AccountId + "/config/status"
+    headers = {'x-redlock-auth':token}
+    response = doPrismaAPICall(action, endpoint, headers, "", "")
+    return response
 
-if (status == 401):
-    print("Call failed")
-else:
-    url2 = PRISMA_CLOUD_API_URL+"/account/"
-    headers2 = {"x-redlock-auth":token}
-    querystring2 = ""
+def printAccountInfo(AccountData, token):
+    print("---Found Cloud account in wrong state")
+    print("   ",AccountData['name'], AccountData['accountId'], " with status ",AccountData['status'])
+    print("   Status details for ",AccountData['name'])
+    response_info = fetchPrismaAccountInfo(AccountData['accountId'], token)
+    for item in response_info:
+        print("   ",item['name'],item['status'],item['message'])
+    print("---Cloud Account Check Done")
+    print("")
+
+def main ():
+    auth_token = ""
+
+    validateConfigParser()
+    auth_token = authenticatePrismaCloud()
+
+    # Fetch all basic cloud account info including overall status, exclude account groups set to True
+    response = fetchPrismaCloudAccounts(auth_token,"True")
     
-    for k in response_data:
+    for k in response:
         if k['status'] != "ok":
-            print("---Found Cloud account in wrong state")
-            print("   ",k['name'], k['accountId'], " with status ",k['status'])
-            querystring2 = k['accountId']+"/config/status"
-            finalurl = url2+querystring2
-            response_raw2 = requests.request("GET", finalurl, headers=headers2)
-            response_data2 = response_raw2.json()
-            print("   Status details for ",k['name'])
-            for m in response_data2:
-                print("   ",m['name'],m['status'],m['message'])
-            print("---Cloud Account Check Done")
-            print("")
+            printAccountInfo(k, auth_token)
 
+if __name__ == "__main__":
+    main()
